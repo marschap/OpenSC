@@ -2160,58 +2160,67 @@ static int
 pgp_update_new_algo_attr(sc_card_t *card, sc_cardctl_openpgp_keygen_info_t *key_info)
 {
 	struct pgp_priv_data *priv = DRVDATA(card);
+	const unsigned int tag = 0x00c0 | key_info->key_id;
 	pgp_blob_t *algo_blob;
-	unsigned int old_modulus_len;     /* measured in bits */
-	unsigned int old_exponent_len;
-	const unsigned int tag = 0x00C0 | key_info->key_id;
-	u8 changed = 0;
+	sc_cardctl_openpgp_keygen_info_t orig_info;
+	u8 data[32];
+	size_t data_len;
 	int r = SC_SUCCESS;
 
 	LOG_FUNC_CALLED(card->ctx);
 
-	/* temporary workaround: protect v3 cards against non-RSA */
-	if (key_info->algorithm != SC_OPENPGP_KEYALGO_RSA)
-		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
-
 	/* get old algorithm attributes */
 	r = pgp_seek_blob(card, priv->mf, tag, &algo_blob);
-	LOG_TEST_RET(card->ctx, r, "Cannot get old algorithm attributes");
-	old_modulus_len = bebytes2ushort(algo_blob->data + 1);  /* modulus length is coded in byte 2 & 3 */
-	sc_log(card->ctx,
-	       "Old modulus length %d, new %"SC_FORMAT_LEN_SIZE_T"u.",
-	       old_modulus_len, key_info->rsa.modulus_len);
-	old_exponent_len = bebytes2ushort(algo_blob->data + 3);  /* exponent length is coded in byte 3 & 4 */
-	sc_log(card->ctx,
-	       "Old exponent length %d, new %"SC_FORMAT_LEN_SIZE_T"u.",
-	       old_exponent_len, key_info->rsa.exponent_len);
+	LOG_TEST_RET(card->ctx, r, "Cannot get current algorithm attributes");
+	r = pgp_parse_algo_attr_blob(algo_blob, &orig_info);
+	LOG_TEST_RET(card->ctx, r, "Cannot parse current algorithm attributes");
 
-	/* Modulus */
-	/* If passed modulus_len is zero, it means using old key size */
-	if (key_info->rsa.modulus_len == 0) {
-		sc_log(card->ctx, "Use old modulus length (%d).", old_modulus_len);
-		key_info->rsa.modulus_len = old_modulus_len;
+	if (key_info->algorithm == SC_OPENPGP_KEYALGO_RSA) {
+		data[0] = SC_OPENPGP_KEYALGO_RSA;
+
+		/* modulus: use old/default length if modulus length passed is 0 */
+		if (key_info->rsa.modulus_len == 0 &&
+		    orig_info.algorithm == SC_OPENPGP_KEYALGO_RSA)
+			key_info->rsa.modulus_len = orig_info.rsa.modulus_len;
+		if (key_info->rsa.modulus_len == 0)
+			key_info->rsa.modulus_len = (priv->bcd_version < OPENPGP_CARD_2_0)
+						    ? 1024 : 2048;	/* fallback/default value */
+		ushort2bebytes(data + 1, key_info->rsa.modulus_len);
+		sc_log(card->ctx, "New RSA modulus length %"SC_FORMAT_LEN_SIZE_T"u.",
+			 key_info->rsa.modulus_len);
+
+		/* exponent: use old/default length if exponent length passed is 0 */
+		if (key_info->rsa.exponent_len == 0 &&
+		    orig_info.algorithm == SC_OPENPGP_KEYALGO_RSA)
+			key_info->rsa.exponent_len = orig_info.rsa.exponent_len;
+		if (key_info->rsa.exponent_len == 0)
+			key_info->rsa.exponent_len = 32;	/* fallback/default_value */
+		ushort2bebytes(data + 3, key_info->rsa.exponent_len);
+		sc_log(card->ctx, "New RSA exponent length %"SC_FORMAT_LEN_SIZE_T"u.",
+			 key_info->rsa.exponent_len);
+
+		/* private key import format */
+		data[5] = (orig_info.algorithm == SC_OPENPGP_KEYALGO_RSA)
+			  ? orig_info.rsa.keyformat
+			  : SC_OPENPGP_KEYFORMAT_RSA_STD;
+
+		/* RSA algorithm attributes length */
+		data_len = (priv->bcd_version < OPENPGP_CARD_2_0) ? 5 : 6;
 	}
-	/* To generate key with new key size */
-	else if (old_modulus_len != key_info->rsa.modulus_len) {
-		algo_blob->data[1] = (unsigned char)(key_info->rsa.modulus_len >> 8);
-		algo_blob->data[2] = (unsigned char)key_info->rsa.modulus_len;
-		changed = 1;
+	else {
+		/* non-RSA not yet supported */
+		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_IMPLEMENTED);
 	}
 
-	/* Exponent */
-	if (key_info->rsa.exponent_len == 0) {
-		sc_log(card->ctx, "Use old exponent length (%d).", old_exponent_len);
-		key_info->rsa.exponent_len = old_exponent_len;
-	}
-	else if (old_exponent_len != key_info->rsa.exponent_len) {
-		algo_blob->data[3] = (unsigned char)(key_info->rsa.exponent_len >> 8);
-		algo_blob->data[4] = (unsigned char)key_info->rsa.exponent_len;
-		changed = 1;
-	}
+	/* if new algorithm attributes differ from the ones read,
+	 * try to set the new value for GENERATE ASYMMETRIC KEY PAIR to work */
+	if (algo_blob->len != data_len || memcmp(algo_blob->data, data, data_len) != 0) {
+		/* fail on difference but changing algorithm attribute DOs not supported */
+		if (!(priv->ext_caps & EXT_CAP_ALG_ATTR_CHANGEABLE)) {
+			LOG_TEST_RET(card->ctx, SC_ERROR_INCORRECT_PARAMETERS,
+				     "changing algorithm attribute DOs not supported");
+		}
 
-	/* If the key to-be-generated has different size,
-	 * set this new value for GENERATE ASYMMETRIC KEY PAIR to work */
-	if (changed) {
 		r = pgp_put_data(card, tag, algo_blob->data, 6);
 		/* Note: Don't use pgp_set_blob to set data, because it won't touch the real DO */
 		LOG_TEST_RET(card->ctx, r, "Cannot set new algorithm attributes");
