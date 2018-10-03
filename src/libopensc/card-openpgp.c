@@ -2507,21 +2507,26 @@ pgp_update_card_algorithms(sc_card_t *card, sc_cardctl_openpgp_keygen_info_t *ke
 
 	LOG_FUNC_CALLED(card->ctx);
 
-	/* temporary workaround: protect v3 cards against non-RSA */
-	if (key_info->algorithm != SC_OPENPGP_KEYALGO_RSA)
-		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
-
 	if (id > card->algorithm_count) {
 		sc_log(card->ctx,
 		       "This key ID %u is out of the card's algorithm list.",
-		       (unsigned int)id);
+		       (unsigned int) id);
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
 
 	/* get the algorithm corresponding to the key ID */
 	algo = card->algorithms + (id - 1);
-	/* update new key length attribute */
-	algo->key_length = (unsigned int)key_info->rsa.modulus_len;
+
+	/* update algorithm & algorithm attributes */
+	if (key_info->algorithm != SC_OPENPGP_KEYALGO_RSA) {
+		algo->algorithm = SC_ALGORITHM_RSA;
+		algo->key_length = (unsigned int) key_info->rsa.modulus_len;
+	}
+	else {
+		// TODO: deal with non-RSA keys
+		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
+	}
+
 	LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
 }
 
