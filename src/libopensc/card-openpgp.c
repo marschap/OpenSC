@@ -2741,25 +2741,23 @@ pgp_build_extended_header_list(sc_card_t *card, sc_cardctl_openpgp_keystore_info
 	if (key_info->algorithm != SC_OPENPGP_KEYALGO_RSA)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_NOT_SUPPORTED);
 
-	if (key_info->rsa.keyformat == SC_OPENPGP_KEYFORMAT_RSA_STDN
-		|| key_info->rsa.keyformat == SC_OPENPGP_KEYFORMAT_RSA_CRTN)
+	if (key_info->rsa.keyformat == SC_OPENPGP_KEYFORMAT_RSA_STDN ||
+	    key_info->rsa.keyformat == SC_OPENPGP_KEYFORMAT_RSA_CRTN)
 		comp_to_add = 4;
 
 	/* validate */
-	if (comp_to_add == 4 && (key_info->rsa.n == NULL || key_info->rsa.n_len == 0)){
-		sc_log(ctx, "Error: Modulus required!");
-		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
-	}
+	if (comp_to_add == 4 && (key_info->rsa.n == NULL || key_info->rsa.n_len == 0))
+		LOG_TEST_RET(ctx, SC_ERROR_INVALID_ARGUMENTS, "Error: Modulus required!");
 
 	/* Cardholder private key template's data part */
 	memset(pritemplate, 0, max_prtem_len);
 
 	/* get required exponent length */
 	alat_blob = pgp_find_blob(card, 0x00C0 | key_info->key_id);
-	if (!alat_blob) {
-		sc_log(ctx, "Cannot read Algorithm Attributes.");
-		LOG_FUNC_RETURN(ctx, SC_ERROR_OBJECT_NOT_FOUND);
-	}
+	if (!alat_blob)
+		LOG_TEST_RET(ctx, SC_ERROR_OBJECT_NOT_FOUND,
+			     "Cannot read Algorithm Attributes.");
+
 	req_e_len = bebytes2ushort(alat_blob->data + 3) >> 3;   /* 1/8 */
 	assert(key_info->rsa.e_len <= req_e_len);
 
@@ -2768,7 +2766,7 @@ pgp_build_extended_header_list(sc_card_t *card, sc_cardctl_openpgp_keystore_info
 	if (key_info->rsa.e_len < req_e_len) {
 		/* create new buffer */
 		p = calloc(req_e_len, 1);
-		if (!p)
+		if (p == NULL)
 			LOG_FUNC_RETURN(ctx, SC_ERROR_NOT_ENOUGH_MEMORY);
 		memcpy(p + req_e_len - key_info->rsa.e_len, key_info->rsa.e, key_info->rsa.e_len);
 		key_info->rsa.e_len = req_e_len;
@@ -2805,42 +2803,35 @@ pgp_build_extended_header_list(sc_card_t *card, sc_cardctl_openpgp_keystore_info
 	LOG_TEST_RET(ctx, r, "Failed to build TLV for 7F48.");
 	tlv_7f48[0] |= 0x7F;
 	r = pgp_build_tlv(ctx, 0x5f48, kdata, kdata_len, &tlv_5f48, &tlvlen_5f48);
-	if (r < 0) {
-		sc_log(ctx, "Failed to build TLV for 5F48.");
-		goto out;
-	}
+	LOG_TEST_GOTO_ERR(ctx, r, "Failed to build TLV for 5F48.");
 
 	/* data part's length for Extended Header list */
 	len = 2 + tlvlen_7f48 + tlvlen_5f48;
 	/* set data part content */
 	data = calloc(len, 1);
 	if (data == NULL) {
-		sc_log(ctx, "Not enough memory.");
-		r = SC_ERROR_NOT_ENOUGH_MEMORY;
-		goto out;
+		LOG_TEST_GOTO_ERR(ctx, SC_ERROR_NOT_ENOUGH_MEMORY,
+				  "Cannot allocate memory for Extended Header List.");
 	}
 	switch (key_info->key_id) {
-	case SC_OPENPGP_KEY_SIGN:
-		data[0] = 0xB6;
-		break;
-	case SC_OPENPGP_KEY_ENCR:
-		data[0] = 0xB8;
-		break;
-	case SC_OPENPGP_KEY_AUTH:
-		data[0] = 0xA4;
-		break;
-	default:
-		sc_log(ctx, "Unknown key type %d.", key_info->key_id);
-		r = SC_ERROR_INVALID_ARGUMENTS;
-		goto out;
+		case SC_OPENPGP_KEY_SIGN:
+			data[0] = 0xB6;
+			break;
+		case SC_OPENPGP_KEY_ENCR:
+			data[0] = 0xB8;
+			break;
+		case SC_OPENPGP_KEY_AUTH:
+			data[0] = 0xA4;
+			break;
+		default:
+			sc_log(ctx, "Unknown key id %d.", key_info->key_id);
+			LOG_TEST_GOTO_ERR(ctx, SC_ERROR_INVALID_ARGUMENTS, "invalid key id");
 	}
-	memcpy(data + 2, tlv_7f48, tlvlen_7f48);
+	memcpy(data + 2,               tlv_7f48, tlvlen_7f48);
 	memcpy(data + 2 + tlvlen_7f48, tlv_5f48, tlvlen_5f48);
-	r = pgp_build_tlv(ctx, 0x4D, data, len, &tlvblock, &tlvlen);
-	if (r < 0) {
-		sc_log(ctx, "Cannot build TLV for Extended Header list.");
-		goto out;
-	}
+	r = pgp_build_tlv(ctx, 0x004D, data, len, &tlvblock, &tlvlen);
+	LOG_TEST_GOTO_ERR(ctx, r, "Cannot build TLV for Extended Header list.");
+
 	/* set output */
 	if (result != NULL) {
 		*result = tlvblock;
@@ -2849,7 +2840,7 @@ pgp_build_extended_header_list(sc_card_t *card, sc_cardctl_openpgp_keystore_info
 		free(tlvblock);
 	}
 
-out:
+err:
 	free(data);
 	free(tlv_5f48);
 	free(tlv_7f48);
