@@ -2283,11 +2283,9 @@ pgp_calculate_and_store_fingerprint(sc_card_t *card, time_t ctime,
 	size_t elen = key_info->rsa.exponent_len >> 3;  /* 1/8 */
 	u8 *fp_buffer = NULL;  /* fingerprint buffer, not hashed */
 	size_t fp_buffer_len;
-	u8 *p; /* use this pointer to set fp_buffer content */
 	size_t pk_packet_len;
 	unsigned int tag = 0x00C6 + key_info->key_id;
 	pgp_blob_t *fpseq_blob;
-	u8 *newdata;
 	int r;
 
 	LOG_FUNC_CALLED(card->ctx);
@@ -2296,43 +2294,35 @@ pgp_calculate_and_store_fingerprint(sc_card_t *card, time_t ctime,
 	if (key_info->algorithm != SC_OPENPGP_KEYALGO_RSA)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
 
-	if (modulus == NULL || exponent == NULL || mlen == 0 || elen == 0) {
-		sc_log(card->ctx, "Null data (modulus or exponent)");
-		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
-	}
+	if (modulus == NULL || exponent == NULL || mlen == 0 || elen == 0)
+		LOG_TEST_RET(card->ctx, SC_ERROR_INVALID_ARGUMENTS,
+			     "Null data (modulus or exponent)");
 
 	/* http://tools.ietf.org/html/rfc4880  page 41, 72 */
-	pk_packet_len =   1   /* version number */
-	                + 4   /* creation time */
-	                + 1   /* algorithm */
-	                + 2   /* algorithm-specific fields: RSA modulus+exponent */
-	                + mlen
-	                + 2
-	                + elen;
+	pk_packet_len =   1	/* version number */
+	                + 4	/* creation time */
+	                + 1	/* algorithm */
+	                + 2	/* algorithm-specific: RSA modulus length */
+	                + mlen	/* algorithm-specific: RSA modulus */
+	                + 2	/* algorithm-specific: RSA exponent length */
+	                + elen;	/* algorithm-specific: RSA exponent */
 
 	fp_buffer_len = 3 + pk_packet_len;
-	p = fp_buffer = calloc(fp_buffer_len, 1);
-	if (!p) {
+	fp_buffer = calloc(fp_buffer_len, 1);
+	if (fp_buffer == NULL)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_ENOUGH_MEMORY);
-	}
 
-	p[0] = 0x99;   /* http://tools.ietf.org/html/rfc4880  page 71 */
-	ushort2bebytes(++p, (unsigned short)pk_packet_len);
-	/* start pk_packet */
-	p += 2;
-	*p = 4;        /* Version 4 key */
-	ulong2bebytes(++p, (unsigned long)ctime);    /* Creation time */
-	p += 4;
-	*p = 1;        /* RSA */
-	/* algorithm-specific fields */
-	ushort2bebytes(++p, (unsigned short)key_info->rsa.modulus_len);
-	p += 2;
-	memcpy(p, modulus, mlen);
-	p += mlen;
-	ushort2bebytes(++p, (unsigned short)key_info->rsa.exponent_len);
-	p += 2;
-	memcpy(p, exponent, elen);
-	p = NULL;
+	fp_buffer[0] = 0x99;   /* http://tools.ietf.org/html/rfc4880  page 71 */
+	ushort2bebytes(fp_buffer + 1, (unsigned short) pk_packet_len);
+								/* start pk_packet */
+	fp_buffer[3] = 4;  					/* Version 4 key */
+	ulong2bebytes(fp_buffer + 4, (unsigned long) ctime);	/* creation time */
+	fp_buffer[8] = SC_OPENPGP_KEYALGO_RSA;			/* RSA */
+								/* algorithm-specific fields */
+	ushort2bebytes(fp_buffer + 9, (unsigned short) key_info->rsa.modulus_len);
+	memcpy(fp_buffer + 11, modulus, mlen);
+	ushort2bebytes(fp_buffer + 11 + mlen, (unsigned short) key_info->rsa.exponent_len);
+	memcpy(fp_buffer + 13 + mlen, exponent, elen);
 
 	/* hash with SHA-1 */
 	SHA1(fp_buffer, fp_buffer_len, fingerprint);
@@ -2346,26 +2336,24 @@ pgp_calculate_and_store_fingerprint(sc_card_t *card, time_t ctime,
 	/* update the blob containing fingerprints (00C5) */
 	sc_log(card->ctx, "Updating fingerprint blob 00C5.");
 	fpseq_blob = pgp_find_blob(card, 0x00C5);
-	if (!fpseq_blob) {
-		sc_log(card->ctx, "Cannot find blob 00C5.");
-		goto exit;
-	}
-	/* save the fingerprints sequence */
-	newdata = malloc(fpseq_blob->len);
-	if (!newdata) {
-		sc_log(card->ctx, "Not enough memory to update fingerprint blob 00C5.");
-		goto exit;
-	}
-	memcpy(newdata, fpseq_blob->data, fpseq_blob->len);
-	/* move p to the portion holding the fingerprint of the current key */
-	p = newdata + 20 * (key_info->key_id - 1);
-	/* copy new fingerprint value */
-	memcpy(p, fingerprint, 20);
-	/* set blob's data */
-	pgp_set_blob(fpseq_blob, newdata, fpseq_blob->len);
-	free(newdata);
+	if (fpseq_blob == NULL)
+		LOG_TEST_RET(card->ctx, SC_ERROR_FILE_NOT_FOUND, "Cannot find blob 00C5.");
 
-exit:
+	/* save the fingerprints sequence */
+	fp_buffer_len = MAX(SHA_DIGEST_LENGTH * 3, fpseq_blob->len);
+	fp_buffer = calloc(fp_buffer_len, 1);
+	if (fp_buffer == NULL)
+		LOG_TEST_RET(card->ctx, SC_ERROR_NOT_ENOUGH_MEMORY,
+			     "Cannot update fingerprint blob 00C5.");
+
+	memcpy(fp_buffer, fpseq_blob->data, fpseq_blob->len);
+	/* copy new fingerprint value */
+	memcpy(fp_buffer + SHA_DIGEST_LENGTH * (key_info->key_id - 1),
+	       fingerprint, SHA_DIGEST_LENGTH);
+	/* set blob's data */
+	pgp_set_blob(fpseq_blob, fp_buffer, fp_buffer_len);
+	free(fp_buffer);
+
 	LOG_FUNC_RETURN(card->ctx, r);
 }
 
