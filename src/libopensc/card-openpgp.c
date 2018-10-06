@@ -2866,23 +2866,22 @@ pgp_store_key(sc_card_t *card, sc_cardctl_openpgp_keystore_info_t *key_info)
 	if (key_info->algorithm != SC_OPENPGP_KEYALGO_RSA)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_NOT_SUPPORTED);
 
-	/* Validate */
+	/* Validate key id */
 	if (key_info->key_id < 1 || key_info->key_id > 3) {
 		sc_log(ctx, "Unknown key type %d.", key_info->key_id);
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
 	/* we just support standard key format */
 	switch (key_info->rsa.keyformat) {
-	case SC_OPENPGP_KEYFORMAT_RSA_STD:
-	case SC_OPENPGP_KEYFORMAT_RSA_STDN:
-		break;
-
-	case SC_OPENPGP_KEYFORMAT_RSA_CRT:
-	case SC_OPENPGP_KEYFORMAT_RSA_CRTN:
-		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
-
-	default:
-		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
+		case SC_OPENPGP_KEYFORMAT_RSA_STD:
+		case SC_OPENPGP_KEYFORMAT_RSA_STDN:
+			break;
+		case SC_OPENPGP_KEYFORMAT_RSA_CRT:
+		case SC_OPENPGP_KEYFORMAT_RSA_CRTN:
+			LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
+			break;
+		default:
+			LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
 
 	/* we only support exponent of maximum 32 bits */
@@ -2896,6 +2895,7 @@ pgp_store_key(sc_card_t *card, sc_cardctl_openpgp_keystore_info_t *key_info)
 	/* set algorithm attributes */
 	memset(&pubkey, 0, sizeof(pubkey));
 	pubkey.key_id = key_info->key_id;
+	pubkey.algorithm = key_info->algorithm;
 	if (key_info->rsa.n && key_info->rsa.n_len) {
 		pubkey.rsa.modulus = key_info->rsa.n;
 		pubkey.rsa.modulus_len = 8*key_info->rsa.n_len;
@@ -2906,29 +2906,21 @@ pgp_store_key(sc_card_t *card, sc_cardctl_openpgp_keystore_info_t *key_info)
 	LOG_TEST_RET(card->ctx, r, "Failed to update new algorithm attributes");
 	/* build Extended Header list */
 	r = pgp_build_extended_header_list(card, key_info, &data, &len);
-	if (r < 0) {
-		sc_log(ctx, "Failed to build Extended Header list.");
-		goto out;
-	}
-	/* write to DO */
-	r = pgp_put_data(card, 0x4D, data, len);
-	if (r < 0) {
-		sc_log(ctx, "Failed to write to DO.");
-		goto out;
-	}
+	LOG_TEST_GOTO_ERR(ctx, r, "Failed to build Extended Header list.");
 
-	free(data);
-	data = NULL;
+	/* write to DO */
+	r = pgp_put_data(card, 0x004D, data, len);
+	LOG_TEST_GOTO_ERR(ctx, r, "Failed to write to DO.");
 
 	/* store creation time */
 	r = pgp_store_creationtime(card, key_info->key_id, &key_info->creationtime);
-	LOG_TEST_RET(card->ctx, r, "Cannot store creation time");
+	LOG_TEST_GOTO_ERR(card->ctx, r, "Cannot store creation time");
 
 	/* Calculate and store fingerprint */
 	sc_log(card->ctx, "Calculate and store fingerprint");
 	r = pgp_calculate_and_store_fingerprint(card, key_info->creationtime,
 						key_info->rsa.n, key_info->rsa.e, &pubkey);
-	LOG_TEST_RET(card->ctx, r, "Cannot store fingerprint.");
+	LOG_TEST_GOTO_ERR(card->ctx, r, "Cannot store fingerprint.");
 	/* update pubkey blobs (B601,B801, A401) */
 	sc_log(card->ctx, "Update blobs holding pubkey info.");
 	r = pgp_update_pubkey_blob(card, key_info->rsa.n, 8*key_info->rsa.n_len,
@@ -2937,11 +2929,8 @@ pgp_store_key(sc_card_t *card, sc_cardctl_openpgp_keystore_info_t *key_info)
 	sc_log(ctx, "Update card algorithms.");
 	pgp_update_card_algorithms(card, &pubkey);
 
-out:
-	if (data) {
-		free(data);
-		data = NULL;
-	}
+err:
+	free(data);
 	LOG_FUNC_RETURN(ctx, r);
 }
 
