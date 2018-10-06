@@ -867,33 +867,36 @@ pgp_finish(sc_card_t *card)
 
 
 /**
- * Internal: fill a blob's data.
+ * Internal: fill a blob's data with new/upsdated content
  */
 static int
 pgp_set_blob(pgp_blob_t *blob, const u8 *data, size_t len)
 {
-	if (blob->data)
+	if (data == NULL || len == 0) {
 		free(blob->data);
-	blob->data = NULL;
-	blob->len    = 0;
-	blob->status = 0;
+		blob->data = NULL;
+		blob->len = 0;
+	}
+	else {
+		if (len < blob->len)
+			memset(blob->data + len, '\0', blob->len - len);
 
-	if (len > 0) {
-		void *tmp = calloc(len, 1);
+		if (len > blob->len) {
+			u8 *tmp = realloc(blob->data, len);
 
-		if (tmp == NULL)
-			return SC_ERROR_OUT_OF_MEMORY;
+			if (tmp == NULL)
+				return SC_ERROR_OUT_OF_MEMORY;
 
-		blob->data = tmp;
-		blob->len  = (unsigned int)len;
-		if (data != NULL)
-			memcpy(blob->data, data, len);
+			blob->data = tmp;
+		}
+		memmove(blob->data, data, len);	/* allow overlap!!! */
+		blob->len = (unsigned int) len;
 	}
 
 	if (blob->file)
-		blob->file->size = len;
+		blob->file->size = blob->len;
 
-	return SC_SUCCESS;
+	return blob->len;
 }
 
 
