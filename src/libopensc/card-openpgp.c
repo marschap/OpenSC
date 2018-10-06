@@ -2543,7 +2543,7 @@ pgp_gen_key(sc_card_t *card, sc_cardctl_openpgp_keygen_info_t *key_info)
 	sc_apdu_t apdu;
 	/* temporary variables to hold APDU params */
 	u8 apdu_case;
-	u8 *apdu_data;
+	u8 apdu_data[2] = { 0, 0 };
 	size_t apdu_le;
 	size_t resplen = 0;
 	int r = SC_SUCCESS;
@@ -2554,25 +2554,21 @@ pgp_gen_key(sc_card_t *card, sc_cardctl_openpgp_keygen_info_t *key_info)
 	if (key_info->algorithm != SC_OPENPGP_KEYALGO_RSA)
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
 
-	/* FIXME the compilers don't assure that the buffers set here as
-	 * apdu_data are present until the end of the function */
 	/* set Control Reference Template for key */
 	if (key_info->key_id == SC_OPENPGP_KEY_SIGN)
-		apdu_data = (unsigned char *) "\xb6";
-		/* as a string, apdu_data will end with '\0' (B6 00) */
+		ushort2bebytes(apdu_data, DO_SIGN);
 	else if (key_info->key_id == SC_OPENPGP_KEY_ENCR)
-		apdu_data = (unsigned char *) "\xb8";
+		ushort2bebytes(apdu_data, DO_ENCR);
 	else if (key_info->key_id == SC_OPENPGP_KEY_AUTH)
-		apdu_data = (unsigned char *) "\xa4";
+		ushort2bebytes(apdu_data, DO_AUTH);
 	else {
-		sc_log(card->ctx, "Unknown key type %X.", key_info->key_id);
+		sc_log(card->ctx, "Unknown key id %X.", key_info->key_id);
 		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
 
-	if (card->type == SC_CARD_TYPE_OPENPGP_GNUK && key_info->rsa.modulus_len != 2048) {
-		sc_log(card->ctx, "Gnuk does not support other key length than 2048.");
-		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INVALID_ARGUMENTS);
-	}
+	if (card->type == SC_CARD_TYPE_OPENPGP_GNUK && key_info->rsa.modulus_len != 2048)
+		LOG_TEST_RET(card->ctx, SC_ERROR_INVALID_ARGUMENTS,
+			     "Gnuk does not support other key length than 2048.");
 
 	/* set attributes for new-generated key */
 	r = pgp_update_new_algo_attr(card, key_info);
@@ -2592,48 +2588,42 @@ pgp_gen_key(sc_card_t *card, sc_cardctl_openpgp_keygen_info_t *key_info)
 	else {
 		apdu_case = SC_APDU_CASE_4_SHORT;
 		apdu_le = 256;
-		resplen = MAXLEN_RESP_PUBKEY;
-	}
-	if (card->type == SC_CARD_TYPE_OPENPGP_GNUK) {
-		resplen = MAXLEN_RESP_PUBKEY_GNUK;
+		resplen = (card->type == SC_CARD_TYPE_OPENPGP_GNUK)
+			  ? MAXLEN_RESP_PUBKEY_GNUK : MAXLEN_RESP_PUBKEY;
 	}
 
-	/* prepare APDU */
+	/* prepare APDU: GENERATE ASYMMETRIC KEY PAIR */
 	sc_format_apdu(card, &apdu, apdu_case, 0x47, 0x80, 0);
 	apdu.data = apdu_data;
-	apdu.datalen = 2;  /* Data = B600 */
-	apdu.lc = 2;
+	apdu.datalen = sizeof(apdu_data);
+	apdu.lc = apdu.datalen;
 	apdu.le = apdu_le;
 
-	/* buffer to receive response */
+	/* buffer to receive public key in response */
 	apdu.resplen = (resplen > 0) ? resplen : apdu_le;
 	apdu.resp = calloc(apdu.resplen, 1);
-	if (apdu.resp == NULL) {
-		LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_ENOUGH_MEMORY);
-	}
+	if (apdu.resp == NULL)
+		LOG_TEST_RET(card->ctx, SC_ERROR_NOT_ENOUGH_MEMORY,
+			     "cannot allocate APDU response buffer");
 
 	/* send */
 	sc_log(card->ctx, "Waiting for the card to generate key...");
 	r = sc_transmit_apdu(card, &apdu);
 	sc_log(card->ctx, "Card has done key generation.");
-	if (r < 0) {
-		sc_log(card->ctx, "APDU transmit failed. Error %s.", sc_strerror(r));
-		goto finish;
-	}
+	LOG_TEST_GOTO_ERR(card->ctx, r, "APDU transmit failed");
 
 	/* check response */
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	/* instruct more in case of error */
-	if (r == SC_ERROR_SECURITY_STATUS_NOT_SATISFIED) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "Please verify PIN first.");
-		goto finish;
-	}
+	/* instruct more in case of a specific error */
+	if (r == SC_ERROR_SECURITY_STATUS_NOT_SATISFIED)
+		SC_TEST_GOTO_ERR(card->ctx, SC_LOG_DEBUG_VERBOSE,
+				 r, "Please verify PIN first.");
 
 	/* parse response data and set output */
 	pgp_parse_and_set_pubkey_output(card, apdu.resp, apdu.resplen, key_info);
 	pgp_update_card_algorithms(card, key_info);
 
-finish:
+err:
 	free(apdu.resp);
 	LOG_FUNC_RETURN(card->ctx, r);
 }
